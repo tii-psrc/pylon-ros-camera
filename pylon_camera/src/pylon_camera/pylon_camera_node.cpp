@@ -499,6 +499,20 @@ void PylonCameraNode::publishImage(const sensor_msgs::ImagePtr image_ptr, const 
     {
         img_raw_pub_.publish(image_ptr);
     }
+    // Publish the corresponding camera_info!
+    if (camera_info_pub_.getNumSubscribers() > 0) {
+        sensor_msgs::CameraInfoPtr cam_info(new sensor_msgs::CameraInfo(camera_info_manager_->getCameraInfo()));
+        cam_info->header.stamp = timestamp;
+        // TODO: this is a hack, need to fix later
+        cam_info->binning_x = 1;
+        cam_info->binning_y = 1;
+        cam_info->roi.x_offset = 0;
+        cam_info->roi.y_offset = 0;
+        cam_info->roi.width = 640;
+        cam_info->roi.height = 640;
+        camera_info_pub_.publish(cam_info);
+    }
+
 }
 
 
@@ -902,7 +916,7 @@ void PylonCameraNode::spin()
                 img_raw_pub_.publish(img_raw_msg_);
         }
 
-        if (num_subscribers_info > 0)
+        if (num_subscribers_info > 0 && trigger_topic_.empty())
         {
             // get actual cam_info-object in every frame, because it might have
             // changed due to a 'set_camera_info'-service call
@@ -923,7 +937,7 @@ void PylonCameraNode::spin()
         }
 
         // this->getNumSubscribersRectImagePub() involves that this->camera_info_manager_->isCalibrated() == true
-        if (num_subscribers_rect > 0)
+        if (num_subscribers_rect > 0 && trigger_topic_.empty())
         {
             cv_bridge_img_rect_->header.stamp = img_raw_msg_.header.stamp;
             assert(pinhole_model_->initialized());
