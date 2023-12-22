@@ -366,17 +366,6 @@ void PylonCameraNode::init()
         setTriggerSelector(0);//frame start
         setTriggerActivation(0);//rising edge
         setTriggerMode(true);//external trigger
-
-        // region of interest settings for superfisheye lens to be usable.
-        // doubling everything because binning=2 is set afterwards
-        sensor_msgs::RegionOfInterest target_roi;
-        target_roi.x_offset = 776;//388; 
-        target_roi.y_offset = 780;//390;
-        target_roi.height = 1280;//640;
-        target_roi.width = 1280;//640;
-
-        sensor_msgs::RegionOfInterest reached_roi;
-        setROI(target_roi, reached_roi);
     }
 
 
@@ -792,7 +781,21 @@ bool PylonCameraNode::startGrabbing()
     // set the flag and call trigger service on IMU side if we work with external triggers
     grabbing_ = true;
     if (!trigger_topic_.empty())
+    {
+      // TODO: these are hardcoded values for PSRC use case. they should be moved to properly set parameters
+
+      // region of interest settings for superfisheye lens to be usable.
+      // binning=2 HAS TO BE SET before these calls. 
+      sensor_msgs::RegionOfInterest target_roi;
+      target_roi.x_offset = 388;
+      target_roi.y_offset = 390;
+      target_roi.height = 640;
+      target_roi.width = 640;
+      sensor_msgs::RegionOfInterest reached_roi;
+      setROI(target_roi, reached_roi);
+
       resetTriggerService();
+    }
     return true;
 }
 
