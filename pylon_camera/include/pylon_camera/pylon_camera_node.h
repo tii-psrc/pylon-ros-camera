@@ -1221,6 +1221,23 @@ protected:
     camera_control_msgs::currentParams params;
 
 
+    // sync with IMU
+    std::string trigger_service_name_;
+    ros::ServiceClient trigger_service_client_;
+    std::string trigger_topic_;
+    ros::Subscriber trigger_subscriber_;
+    std::mutex mtx_imusync_;
+    const int MAX_IMU_TRIGGERS_QUEUE_SIZE = 200;
+    std::map<uint32_t, ros::Time> imu_triggers_map_;
+    std::map<uint32_t, sensor_msgs::ImagePtr> image_msg_map_;
+    long frame_count_;
+    bool grabbing_;
+    void resetTriggerService();
+    void enableTriggerService(bool enable);
+    void on_newIMUTimestamp_Header(const std_msgs::HeaderConstPtr& trg_msg);
+    void pushBackTimestampIMUSync(const ros::Time& timestamp, uint32_t timestamp_count);
+    void pushBackImage(const sensor_msgs::ImagePtr image_ptr, uint32_t image_count);
+    void publishImage(const sensor_msgs::ImagePtr image_ptr, const ros::Time& timestamp);
 
 
     PylonCamera* pylon_camera_;

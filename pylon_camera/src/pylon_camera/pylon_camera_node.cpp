@@ -36,6 +36,8 @@
 #include <vector>
 #include "boost/multi_array.hpp"
 //#include <dnb_msgs/ComponentStatus.h>
+#include <std_srvs/SetBool.h>
+
 
 using diagnostic_msgs::DiagnosticStatus;
 
@@ -338,6 +340,14 @@ void PylonCameraNode::init()
     // in case they are provided
     pylon_camera_parameter_set_.readFromRosParameterServer(nh_);
 
+    // trigger settings for IMU triggering
+    nh_.param<std::string>("trigger_service", trigger_service_name_, "");
+    ROS_INFO("trigger_service = '%s'", trigger_service_name_.c_str());
+    nh_.param<std::string>("trigger_topic", trigger_topic_, "");
+    ROS_INFO("trigger_topic = '%s'", trigger_topic_.c_str());
+    if (!trigger_service_name_.empty())
+        trigger_service_client_ = nh_.serviceClient<std_srvs::SetBool>(trigger_service_name_);
+
     // creating the target PylonCamera-Object with the specified
     // device_user_id, registering the Software-Trigger-Mode, starting the
     // communication with the device and enabling the desired startup-settings
@@ -347,6 +357,29 @@ void PylonCameraNode::init()
         return;
     }
 
+    if (!trigger_topic_.empty())
+    {
+        // TODO: these are hardcoded values for PSRC use case. they should be moved to properly set parameters
+
+        // if trigger topic is given we should change trigger source parameters before starting to grab
+        setTriggerSource(2);//line 3
+        setTriggerSelector(0);//frame start
+        setTriggerActivation(0);//rising edge
+        setTriggerMode(true);//external trigger
+
+        // region of interest settings for superfisheye lens to be usable.
+        // doubling everything because binning=2 is set afterwards
+        sensor_msgs::RegionOfInterest target_roi;
+        target_roi.x_offset = 776;//388; 
+        target_roi.y_offset = 780;//390;
+        target_roi.height = 1280;//640;
+        target_roi.width = 1280;//640;
+
+        sensor_msgs::RegionOfInterest reached_roi;
+        setROI(target_roi, reached_roi);
+    }
+
+
     // starting the grabbing procedure with the desired image-settings
     if ( !startGrabbing() )
     {
@@ -355,10 +388,134 @@ void PylonCameraNode::init()
     }
 }
 
+
+void PylonCameraNode::resetTriggerService()
+{
+    ROS_INFO("resetTriggerService - resetting IMU trigger");
+
+    if (!trigger_service_name_.empty())
+    {
+        enableTriggerService(false);
+        //ros::Duration(1, 0).sleep();
+    }
+
+    //TODO: make sure that all images are cleared from previous grabbing
+
+    //reset subscriber to clear msg in queue
+    if(trigger_subscriber_)
+      trigger_subscriber_.shutdown();
+
+    imu_triggers_map_.clear();
+    image_msg_map_.clear();
+    frame_count_ = 0;
+
+    trigger_subscriber_ = nh_.subscribe(trigger_topic_, 10, &PylonCameraNode::on_newIMUTimestamp_Header, this, ros::TransportHints().tcpNoDelay());
+
+    if (!trigger_service_name_.empty())
+    {
+        //ros::Duration(1, 0).sleep();
+        enableTriggerService(true);
+    }
+}
+
+void PylonCameraNode::enableTriggerService(bool enable)
+{
+    // if we are not given trigger service name, don't do anything
+    if (trigger_service_name_.empty())
+      return;
+
+    if(enable)
+      ROS_WARN("enableTriggerService - START IMU triggers");
+    else
+      ROS_WARN("enableTriggerService - STOP IMU triggers");
+
+    std_srvs::SetBool service_data;
+    service_data.request.data = enable;
+    if(!trigger_service_client_.call(service_data))
+    {
+      ROS_FATAL("enableTriggerService - service not responding");
+      ros::shutdown();
+    }
+}
+
+void PylonCameraNode::on_newIMUTimestamp_Header(const std_msgs::HeaderConstPtr& trg_msg)
+{
+    pushBackTimestampIMUSync(trg_msg->stamp, trg_msg->seq);
+}
+
+void PylonCameraNode::pushBackTimestampIMUSync(const ros::Time& timestamp, uint32_t timestamp_count)
+{
+    if(!this->grabbing_)
+    {
+      ROS_ERROR_STREAM("pushBackTimestampIMUSync - GOT IMU timestamp while camera was not grabbing.");
+    }
+    ROS_INFO_STREAM("pushBackTimestampIMUSync - GOT TIMESTAMP num: " << timestamp_count << ". IMU queue size: " << imu_triggers_map_.size());
+
+    //check if there is an image already available for this timestamp
+    std::lock_guard<std::mutex> lck(mtx_imusync_);
+    auto img_it = image_msg_map_.find(timestamp_count);
+
+    if(img_it != image_msg_map_.end()) //img found, publish it and exit
+    {
+      publishImage(img_it->second, timestamp);
+      ROS_DEBUG("published IMAGE from IMU timestamp");
+      image_msg_map_.erase(img_it); // hope is that this will delete the image message to which the pointer points to
+      return;
+    }
+    else //image not found, add timestamp to the map
+    {
+      ROS_DEBUG_STREAM("pushBackTimestampIMUSync - not found image for timestamp number " << timestamp_count);
+      imu_triggers_map_[timestamp_count] = timestamp;
+      if(imu_triggers_map_.size() > MAX_IMU_TRIGGERS_QUEUE_SIZE)
+      {
+        ROS_FATAL("pushBackTimestampIMUSync - too many IMU timestamps received and no image found. Exiting.");
+        ros::shutdown();
+      }
+    }
+  }
+
+
+void PylonCameraNode::pushBackImage(const sensor_msgs::ImagePtr image_ptr, uint32_t image_count)
+{
+    ROS_DEBUG_STREAM("pushBackImage - got IMAGE number: " << image_count << ". img queue size: " << image_msg_map_.size());
+    //check if there is a timestamp already available for this image
+    std::lock_guard<std::mutex> lck(mtx_imusync_);
+    auto trg_it = imu_triggers_map_.find(image_count);
+
+    if(trg_it != imu_triggers_map_.end()) //timestamp found, publish image and exit
+    {
+      publishImage(image_ptr, trg_it->second);
+      imu_triggers_map_.erase(trg_it);
+      return;
+    }
+    else //timestamp not found, add img to the map
+    {
+      ROS_DEBUG_STREAM("pushBackImage - not found timestamp for image number: " << image_count);
+      image_msg_map_.emplace(image_count, image_ptr);
+      if(image_msg_map_.size() > MAX_IMU_TRIGGERS_QUEUE_SIZE)
+      {
+        ROS_FATAL("pushBackImage - too many IMAGES received and no IMU timestamps. Exiting.");
+        ros::shutdown();
+      }
+    }
+}
+
+
+void PylonCameraNode::publishImage(const sensor_msgs::ImagePtr image_ptr, const ros::Time& timestamp)
+{
+    image_ptr->header.stamp = timestamp;
+
+    // Publish the message using standard image transport
+    if (img_raw_pub_.getNumSubscribers() > 0)
+    {
+        img_raw_pub_.publish(image_ptr);
+    }
+}
+
+
 bool PylonCameraNode::initAndRegister()
 {
-    pylon_camera_ = PylonCamera::create(
-                                    pylon_camera_parameter_set_.deviceUserID());
+    pylon_camera_ = PylonCamera::create(pylon_camera_parameter_set_.deviceUserID());
 
     if (pylon_camera_ == nullptr)
     {
@@ -632,6 +789,10 @@ bool PylonCameraNode::startGrabbing()
         ROS_INFO("Max possible framerate is %.2f Hz",
                  pylon_camera_->maxPossibleFramerate());
     }
+    // set the flag and call trigger service on IMU side if we work with external triggers
+    grabbing_ = true;
+    if (!trigger_topic_.empty())
+      resetTriggerService();
     return true;
 }
 
@@ -720,9 +881,9 @@ void PylonCameraNode::spin()
     uint32_t num_subscribers_raw = getNumSubscribersRaw();
     uint32_t num_subscribers_rect = getNumSubscribersRect();
     uint32_t num_subscribers_info = getNumSubscribersInfo();
-    if (!isSleeping() && (num_subscribers_raw || num_subscribers_rect || num_subscribers_info))
+    if (!isSleeping() && (num_subscribers_raw || num_subscribers_rect || num_subscribers_info || !trigger_topic_.empty()))
     {
-        if (num_subscribers_raw || num_subscribers_rect)
+        if (num_subscribers_raw || num_subscribers_rect || !trigger_topic_.empty())
         {
             if (!grabImage())
             { 
@@ -733,7 +894,9 @@ void PylonCameraNode::spin()
         if (num_subscribers_raw > 0)
         { 
             // Publish via image_transport
-            img_raw_pub_.publish(img_raw_msg_);
+            // if we have external trigger topic then publishing will be done from grabImage via code matching images and timestamps
+            if (trigger_topic_.empty())
+                img_raw_pub_.publish(img_raw_msg_);
         }
 
         if (num_subscribers_info > 0)
@@ -795,7 +958,13 @@ bool PylonCameraNode::grabImage()
     {
         return false;
     }
-    img_raw_msg_.header.stamp = grab_time; 
+    img_raw_msg_.header.stamp = grab_time;
+    if (!trigger_topic_.empty())
+    {
+        // make copy and store a pointer to Image msg. or publish if there is timestamp for it already
+        ROS_INFO("grabImage: calling pushBackImage. frame_count = %d", frame_count_);
+        pushBackImage(sensor_msgs::ImagePtr(new sensor_msgs::Image(img_raw_msg_)), frame_count_++);
+    }
     return true;
 }
 
@@ -1240,7 +1409,7 @@ bool PylonCameraNode::setROI(const sensor_msgs::RegionOfInterest target_roi,
                 cam_info->roi = pylon_camera_->currentROI();
                 camera_info_manager_->setCameraInfo(*cam_info);
                 img_raw_msg_.width = pylon_camera_->imageCols();
-		img_raw_msg_.height = pylon_camera_->imageRows();
+                img_raw_msg_.height = pylon_camera_->imageRows();
                 // step = full row length in bytes, img_size = (step * rows), imagePixelDepth
                 // already contains the number of channels
                 img_raw_msg_.step = img_raw_msg_.width * pylon_camera_->imagePixelDepth();

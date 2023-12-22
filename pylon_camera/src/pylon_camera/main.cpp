@@ -45,6 +45,7 @@ int main(int argc, char **argv)
 
     pylon_camera::PylonCameraNode pylon_camera_node;
 
+    //ros::Rate r(2 * pylon_camera_node.frameRate());
     ros::Rate r(pylon_camera_node.frameRate());
 
     ROS_INFO_STREAM("Start image grabbing if node connects to topic with "
