@@ -508,8 +508,8 @@ void PylonCameraNode::publishImage(const sensor_msgs::ImagePtr image_ptr, const 
         cam_info->binning_y = 1;
         cam_info->roi.x_offset = 0;
         cam_info->roi.y_offset = 0;
-        cam_info->roi.width = 640;
-        cam_info->roi.height = 640;
+        cam_info->roi.width = 800;
+        cam_info->roi.height = 800;
         camera_info_pub_.publish(cam_info);
     }
 
@@ -801,10 +801,10 @@ bool PylonCameraNode::startGrabbing()
       // region of interest settings for superfisheye lens to be usable.
       // binning=2 HAS TO BE SET before these calls. 
       sensor_msgs::RegionOfInterest target_roi;
-      target_roi.x_offset = 388;
-      target_roi.y_offset = 390;
-      target_roi.height = 640;
-      target_roi.width = 640;
+      target_roi.x_offset = 308;
+      target_roi.y_offset = 310;
+      target_roi.height = 800;
+      target_roi.width = 800;
       sensor_msgs::RegionOfInterest reached_roi;
       setROI(target_roi, reached_roi);
 
